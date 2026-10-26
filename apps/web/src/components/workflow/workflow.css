@@ -1,0 +1,296 @@
+/*
+ * Workflow chart. Loaded with the chart's lazy chunk.
+ * Node animations use transform and opacity only, so they stay on the compositor. Only edges into
+ * running nodes animate their dashes. Everything stops under prefers-reduced-motion.
+ */
+
+[data-workflow-flow] {
+  --xy-background-color: transparent;
+  --xy-edge-stroke: color-mix(in srgb, var(--foreground) 28%, transparent);
+  --xy-controls-button-background-color: var(--background);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: none;
+  --wf-running: var(--info);
+  --wf-waiting: var(--warning);
+  --wf-completed: color-mix(in srgb, var(--success) 75%, transparent);
+  --wf-failed: var(--destructive);
+  --wf-idle: color-mix(in srgb, var(--foreground) 28%, transparent);
+}
+
+[data-workflow-flow] .react-flow__node {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+[data-workflow-flow] .react-flow__handle {
+  width: 4px;
+  height: 4px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  opacity: 0;
+}
+
+[data-workflow-flow] .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+[data-workflow-flow] .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* Edges */
+[data-workflow-flow] .react-flow__edge-path {
+  stroke-width: 1.2;
+}
+[data-workflow-flow] .wf-edge-running .react-flow__edge-path {
+  stroke: var(--wf-running);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+  animation: wf-dash 0.8s linear infinite;
+}
+[data-workflow-flow] .wf-edge-waiting .react-flow__edge-path {
+  stroke: var(--wf-waiting);
+}
+[data-workflow-flow] .wf-edge-completed .react-flow__edge-path {
+  stroke: var(--wf-completed);
+}
+[data-workflow-flow] .wf-edge-failed .react-flow__edge-path {
+  stroke: var(--wf-failed);
+}
+
+[data-wf-edge-label] {
+  position: absolute;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Nodes */
+[data-wf-node] {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  width: 100%;
+  height: 100%;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+}
+[data-wf-node] > * {
+  position: relative;
+  z-index: 1;
+}
+button[data-wf-node] {
+  cursor: pointer;
+}
+button[data-wf-node]:hover {
+  border-color: color-mix(in srgb, var(--foreground) 25%, var(--border));
+}
+[data-wf-node]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+[data-wf-node="orchestrator"],
+[data-wf-node="router"] {
+  align-items: center;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--foreground) 5%, var(--background));
+  text-align: center;
+}
+[data-wf-node="prompt"],
+[data-wf-node="worktree"],
+[data-wf-node="collect"] {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+}
+[data-wf-node="prompt"] {
+  padding: 0 14px;
+}
+[data-wf-node="worktree"],
+[data-wf-node="collect"] {
+  justify-content: center;
+  padding: 0 10px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+[data-wf-node][data-status="pending"] {
+  border-style: dashed;
+  opacity: 0.7;
+}
+[data-wf-node][data-status="waiting"] {
+  border-color: color-mix(in srgb, var(--wf-waiting) 60%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wf-waiting) 12%, transparent);
+}
+[data-wf-node][data-status="failed"] {
+  border-color: color-mix(in srgb, var(--wf-failed) 55%, var(--border));
+}
+[data-wf-node][data-status="running"] {
+  border-color: transparent;
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--wf-running) 12%, transparent),
+    0 0 22px -8px var(--wf-running);
+}
+/* A light sweeping around the border: a rotating gradient under an inset that covers the middle. */
+[data-wf-node][data-status="running"]::before {
+  content: "";
+  position: absolute;
+  inset: -100%;
+  background: conic-gradient(
+    from 0deg,
+    color-mix(in srgb, var(--wf-running) 35%, transparent) 0deg 240deg,
+    var(--wf-running) 320deg,
+    color-mix(in srgb, var(--wf-running) 35%, transparent) 360deg
+  );
+  animation: wf-spin 2.2s linear infinite;
+}
+[data-wf-node][data-status="running"]::after {
+  content: "";
+  position: absolute;
+  inset: 1.5px;
+  border-radius: 8px;
+  background: var(--background);
+}
+[data-wf-node="worktree"][data-status="running"]::after,
+[data-wf-node="collect"][data-status="running"]::after,
+[data-wf-node="prompt"][data-status="running"]::after {
+  border-radius: 999px;
+}
+[data-wf-node="worktree"][data-status="running"],
+[data-wf-node="collect"][data-status="running"] {
+  color: var(--wf-running);
+}
+[data-wf-node="worktree"][data-status="completed"] {
+  color: var(--success);
+}
+
+[data-wf-status] {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-wf-dot] {
+  position: relative;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+[data-wf-status="running"] {
+  color: var(--wf-running);
+}
+[data-wf-status="waiting"] {
+  color: var(--wf-waiting);
+}
+[data-wf-status="completed"] {
+  color: var(--success);
+}
+[data-wf-status="failed"] {
+  color: var(--destructive);
+}
+[data-wf-status="running"] [data-wf-dot]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  animation: wf-ping 1.4s ease-out infinite;
+}
+[data-wf-status="waiting"] [data-wf-dot] {
+  animation: wf-blink 1.6s ease-in-out infinite;
+}
+
+[data-wf-run] {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--foreground) 2.5%, transparent);
+}
+[data-wf-run-label] {
+  position: absolute;
+  top: 9px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+[data-wf-run-label][data-live="true"] {
+  color: var(--wf-running);
+}
+[data-wf-run-label][data-live="true"] [data-wf-dot] {
+  animation: wf-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes wf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes wf-ping {
+  from {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+@keyframes wf-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes wf-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-workflow-flow] *,
+  [data-workflow-flow] *::before,
+  [data-workflow-flow] *::after {
+    animation: none !important;
+  }
+}

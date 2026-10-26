@@ -26,6 +26,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { deriveWorkflowRuns, type WorkflowRun } from "@t3tools/client-runtime/state/workflow-runs";
 import { Atom } from "effect/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
@@ -436,4 +437,32 @@ export function useThreadRelationshipShells(
   ref: ScopedThreadRef,
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
   return useAtomValue(relationshipShellsAtomFamily(threadKey(ref)));
+}
+
+const EMPTY_WORKFLOW_RUNS: ReadonlyArray<WorkflowRun> = [];
+
+const workflowRunsAtomFamily = Atom.family((key: string) => {
+  const ref = parseThreadKey(key);
+  let previous = EMPTY_WORKFLOW_RUNS;
+  let previousJson = "[]";
+  return Atom.make((get) => {
+    const thread = get(environmentThreadDetails.quietThreadAtom(ref));
+    if (thread === null) return EMPTY_WORKFLOW_RUNS;
+    const next = deriveWorkflowRuns({
+      projection: thread.projection,
+      threads: get(environmentThreadShells.environmentThreadsAtom(ref.environmentId)),
+    });
+    // Any thread in the environment changing reruns this; keep the old value when the chart is
+    // the same so the open panel does not redraw.
+    const nextJson = JSON.stringify(next);
+    if (nextJson === previousJson) return previous;
+    previous = next;
+    previousJson = nextJson;
+    return next;
+  }).pipe(Atom.withLabel(`web-thread-workflow-runs:${key}`));
+});
+
+/** The thread's runs as workflow charts, nested through its loaded thread family. */
+export function useWorkflowRuns(ref: ScopedThreadRef): ReadonlyArray<WorkflowRun> {
+  return useAtomValue(workflowRunsAtomFamily(threadKey(ref)));
 }

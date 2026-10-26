@@ -327,6 +327,10 @@
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"
     },
+    "./state/workflow-runs": {
+      "types": "./src/state/workflowRuns.ts",
+      "default": "./src/state/workflowRuns.ts"
+    },
     "./state/thread-undo": {
       "types": "./src/state/threadUndo.ts",
       "default": "./src/state/threadUndo.ts"

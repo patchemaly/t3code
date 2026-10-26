@@ -1,4 +1,4 @@
-import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
+import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon, WorkflowIcon } from "lucide-react";
 import { Maximize2, Minimize2 } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
 import { memo, type ReactElement, type ReactNode } from "react";
@@ -25,6 +25,12 @@ export interface PanelLayoutControlsProps {
   rightPanelOpen: boolean;
   rightPanelShortcutLabel: string | null;
   rightPanelUnavailableLabel?: string;
+  /** The workflow chart toggle shows only where the view supplies a handler. */
+  workflowOpen?: boolean;
+  /** Agents are working: the toggle carries a live dot so the chart is worth opening. */
+  workflowLive?: boolean;
+  workflowShortcutLabel?: string | null;
+  onToggleWorkflow?: () => void;
   onToggleTerminal: () => void;
   onToggleThreadPanel: () => void;
   onToggleRightPanel: () => void;
@@ -45,6 +51,10 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   rightPanelOpen,
   rightPanelShortcutLabel,
   rightPanelUnavailableLabel = "Right panel is unavailable",
+  workflowOpen = false,
+  workflowLive = false,
+  workflowShortcutLabel = null,
+  onToggleWorkflow,
   onToggleTerminal,
   onToggleThreadPanel,
   onToggleRightPanel,
@@ -107,6 +117,36 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
           </TooltipPopup>
         </Tooltip>
       ) : null}
+      {onToggleWorkflow ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="relative shrink-0 [-webkit-app-region:no-drag]"
+                pressed={workflowOpen}
+                onPressedChange={onToggleWorkflow}
+                aria-label={
+                  workflowLive ? "Toggle workflow chart, agents working" : "Toggle workflow chart"
+                }
+                data-workflow-toggle
+                variant="ghost"
+                size="sm"
+              >
+                <WorkflowIcon className="size-4" />
+                {workflowLive ? (
+                  <span
+                    aria-hidden
+                    className="absolute top-1 right-1 size-1.5 rounded-full bg-info ring-2 ring-background motion-safe:animate-pulse"
+                  />
+                ) : null}
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {`Toggle workflow chart${workflowShortcutLabel ? ` (${workflowShortcutLabel})` : ""}`}
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
       {showRightPanelControl ? (
         <Tooltip>
           <TooltipTrigger render={<span className="flex shrink-0" />}>
@@ -164,7 +204,10 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
 });
 
 /** The thread panel toggle on a header whose right side the inline right panel covers. */
-export function ThreadPanelHeaderControl(props: PanelLayoutControlsProps) {
+export function ThreadPanelHeaderControl({
+  onToggleWorkflow: _workflowToggleStaysInTitlebar,
+  ...props
+}: PanelLayoutControlsProps) {
   return (
     <div
       className="absolute top-[var(--workspace-controls-top)] right-[calc(env(safe-area-inset-right)+0.75rem)] z-50 flex h-[var(--workspace-topbar-height)] items-center [-webkit-app-region:no-drag]"

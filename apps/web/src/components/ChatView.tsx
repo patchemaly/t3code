@@ -58,6 +58,7 @@ import {
   AuthTerminalOperateScope,
   type AssistantCitation,
   type ChatFileAttachment,
+  isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   type EnvironmentId,
   type MessageId,
@@ -348,6 +349,8 @@ import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { observeResize } from "~/lib/observeResize";
 import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
+import { WorkflowPanelSlot } from "./workflow/WorkflowPanel";
+import { toggleWorkflowPanel, useWorkflowPanelOpen } from "../workflowPanelStore";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
 import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
@@ -877,6 +880,15 @@ export default function ChatView(props: ChatViewProps) {
   })();
   const activeThreadRef = useActiveThreadRef(activeThread);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  // The workflow chart charts server runs; drafts have none yet.
+  const workflowThreadKey = isServerThread ? activeThreadKey : null;
+  const workflowOpen = useWorkflowPanelOpen(workflowThreadKey);
+  const workflowLive =
+    serverProjection?.subagents.some((subagent) => isOrchestrationV2WorkActive(subagent.status)) ??
+    false;
+  const toggleWorkflowPanelStable = useStableCallback(() => {
+    if (workflowThreadKey !== null) toggleWorkflowPanel(workflowThreadKey);
+  });
   const activeEnvironmentServerBrowser = useEnvironmentSupportsServerBrowser(
     activeThreadRef?.environmentId ?? null,
   );
@@ -2650,6 +2662,10 @@ export default function ChatView(props: ChatViewProps) {
       "thread.copyReference": ({ event }) => {
         if (!event.repeat) copyActiveThreadReference();
       },
+      "workflow.toggle": ({ event }) => {
+        if (workflowThreadKey === null) return false;
+        if (!event.repeat) toggleWorkflowPanel(workflowThreadKey);
+      },
       "chat.find": () => {
         if (!isServerThread || serverConfig?.threadFind !== true || activeThreadKey === null)
           return false;
@@ -3089,6 +3105,14 @@ export default function ChatView(props: ChatViewProps) {
     onToggleTerminal: toggleTerminalVisibilityStable,
     onToggleThreadPanel: toggleThreadPanelStable,
     onToggleRightPanel: toggleRightPanelStable,
+    ...(workflowThreadKey !== null
+      ? {
+          workflowOpen,
+          workflowLive,
+          workflowShortcutLabel: shortcutLabelForCommand(keybindings, "workflow.toggle"),
+          onToggleWorkflow: toggleWorkflowPanelStable,
+        }
+      : {}),
   } satisfies PanelLayoutControlsProps;
   const panelToggleControls = (
     <PanelLayoutControls
@@ -3173,7 +3197,13 @@ export default function ChatView(props: ChatViewProps) {
           />
         </header>
 
+        <WorkflowPanelSlot slot="top" threadRef={activeThreadRef} threadKey={workflowThreadKey} />
         <div className="relative flex min-h-0 min-w-0 flex-1">
+          <WorkflowPanelSlot
+            slot="left"
+            threadRef={activeThreadRef}
+            threadKey={workflowThreadKey}
+          />
           <ThreadFindCanvas
             findOptions={{
               skills: timelineSkills,
@@ -3801,7 +3831,17 @@ export default function ChatView(props: ChatViewProps) {
               onPrepared={handlePreparedPullRequestThreadStable}
             />
           </ThreadFindCanvas>
+          <WorkflowPanelSlot
+            slot="right"
+            threadRef={activeThreadRef}
+            threadKey={workflowThreadKey}
+          />
         </div>
+        <WorkflowPanelSlot
+          slot="bottom"
+          threadRef={activeThreadRef}
+          threadKey={workflowThreadKey}
+        />
 
         <ChatTerminalDrawers
           activeThreadKey={activeThreadKey}
