@@ -1,4 +1,5 @@
 import {
+  isProviderNativeSubagentThread,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -6,6 +7,7 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   type RunId,
+  type NodeId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -20,8 +22,18 @@ export type WorkflowStatus =
   | "failed"
   | "stopped";
 
+export interface WorkflowTokenUsage {
+  readonly totalTokens: number;
+  readonly complete: boolean;
+}
+
 export interface WorkflowAgent {
   readonly id: string;
+  readonly control: {
+    readonly threadId: ThreadId;
+    readonly subagentId: NodeId | null;
+    readonly workflow?: boolean;
+  } | null;
   /** The thread the agent works in, when it has its own. Opening the node opens this thread. */
   readonly threadId: ThreadId | null;
   readonly title: string;
@@ -29,6 +41,7 @@ export interface WorkflowAgent {
   readonly driver: ProviderDriverKind | null;
   readonly providerInstanceId: ProviderInstanceId | null;
   readonly model: string | null;
+  readonly tokenUsage: WorkflowTokenUsage | null;
   readonly status: WorkflowStatus;
   readonly progress: string | null;
   readonly startedAt: string | null;
@@ -54,6 +67,8 @@ export interface WorkflowRun {
   readonly status: WorkflowStatus;
   readonly providerInstanceId: ProviderInstanceId;
   readonly model: string;
+  readonly mainTokenUsage: WorkflowTokenUsage | null;
+  readonly tokenUsage: WorkflowTokenUsage | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly agents: ReadonlyArray<WorkflowAgent>;
@@ -62,12 +77,12 @@ export interface WorkflowRun {
   readonly review: {
     readonly status: WorkflowStatus;
     readonly pullRequestNumber: number | null;
-  };
+  } | null;
 }
 
 interface Projection extends Pick<
   OrchestrationV2ThreadProjection,
-  "runs" | "subagents" | "messages"
+  "runs" | "subagents" | "messages" | "checkpoints" | "attempts" | "providerTurns"
 > {
   readonly thread: Pick<
     OrchestrationV2ThreadProjection["thread"],
@@ -116,6 +131,86 @@ function firstLine(text: string | null | undefined): string | null {
   return line ? line : null;
 }
 
+function sumTokenUsage(
+  entries: ReadonlyArray<WorkflowTokenUsage | null>,
+): WorkflowTokenUsage | null {
+  const reported = entries.filter((entry) => entry !== null);
+  if (reported.length === 0) return null;
+  return {
+    totalTokens: reported.reduce((total, entry) => total + entry.totalTokens, 0),
+    complete: reported.length === entries.length && reported.every((entry) => entry.complete),
+  };
+}
+
+function providerTokenUsage(turns: Projection["providerTurns"]): WorkflowTokenUsage | null {
+  return sumTokenUsage(
+    turns.map((turn) => {
+      const usage = turn.turnTokenUsage;
+      if (usage?.inputTokens === undefined && usage?.outputTokens === undefined) return null;
+      return {
+        totalTokens: (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0),
+        complete: usage?.usageStatus === "complete",
+      };
+    }),
+  );
+}
+
+function runTokenUsage(projection: Projection, run: OrchestrationV2Run) {
+  const roots = new Set([
+    run.rootNodeId,
+    ...projection.attempts
+      .filter((attempt) => attempt.runId === run.id)
+      .map((attempt) => attempt.rootNodeId),
+  ]);
+  return providerTokenUsage(projection.providerTurns.filter((turn) => roots.has(turn.nodeId)));
+}
+
+function agentWithTokenUsage(
+  agent: WorkflowAgent,
+  owner: Projection,
+  projectionForThread: (threadId: ThreadId) => Projection | null,
+): WorkflowAgent {
+  const source = owner.subagents.find((entry) => entry.id === agent.id);
+  const child = agent.threadId === null ? null : projectionForThread(agent.threadId);
+  const childRuns = child?.runs.filter((run) => run.status !== "rolled_back") ?? [];
+  const delegatedRuns =
+    source === undefined ? [] : childRuns.filter((run) => run.delegatedTaskId === source.id);
+  const firstRun = [...childRuns].sort((left, right) => left.ordinal - right.ordinal)[0];
+  const ownUsage =
+    agent.tokenUsage ??
+    (child !== null
+      ? sumTokenUsage(
+          (delegatedRuns.length > 0 ? delegatedRuns : firstRun ? [firstRun] : []).map((run) =>
+            runTokenUsage(child, run),
+          ),
+        )
+      : providerTokenUsage(owner.providerTurns.filter((turn) => turn.nodeId === source?.id)));
+  const descendantOwner = (entry: WorkflowAgent) =>
+    owner.subagents.some((subagent) => subagent.id === entry.id) ? owner : (child ?? owner);
+  const children = agent.children.map((entry) =>
+    agentWithTokenUsage(entry, descendantOwner(entry), projectionForThread),
+  );
+  const phases = agent.phases.map((phase) => ({
+    ...phase,
+    agents: phase.agents.map((entry) =>
+      agentWithTokenUsage(entry, descendantOwner(entry), projectionForThread),
+    ),
+  }));
+  const descendants = [...children, ...phases.flatMap((phase) => phase.agents)];
+  return {
+    ...agent,
+    children,
+    phases,
+    tokenUsage:
+      source?.workflow?.totalTokens !== undefined
+        ? { totalTokens: source.workflow.totalTokens, complete: true }
+        : sumTokenUsage([
+            ...(source?.workflow !== undefined && ownUsage === null ? [] : [ownUsage]),
+            ...descendants.map((entry) => entry.tokenUsage),
+          ]),
+  };
+}
+
 interface Context {
   readonly threadsById: ReadonlyMap<ThreadId, OrchestrationV2ThreadShell>;
   readonly childrenByParent: ReadonlyMap<ThreadId, ReadonlyArray<OrchestrationV2ThreadShell>>;
@@ -159,12 +254,16 @@ function shellAgent(
   const workspace = workspaceOf(context, shell.id, parentWorktreePath);
   return {
     id: `thread:${shell.id}`,
+    control: isProviderNativeSubagentThread(shell)
+      ? null
+      : { threadId: shell.id, subagentId: null },
     threadId: shell.id,
     title: shell.title,
     task: null,
     driver: null,
     providerInstanceId: shell.providerInstanceId,
     model: shell.modelSelection.model,
+    tokenUsage: null,
     status: shellStatus(shell),
     progress: null,
     startedAt: iso(shell.latestRunStartedAt ?? null),
@@ -196,12 +295,15 @@ function workflowPhases(subagent: OrchestrationV2Subagent, coordinatorStatus: Wo
     const phaseIndex = agent.phaseIndex ?? 0;
     const member: WorkflowAgent = {
       id: `${subagent.id}:agent:${agent.index}`,
+      control: null,
       threadId: agent.childThreadId ?? null,
       title: agent.label,
       task: firstLine(agent.prompt),
       driver: subagent.driver,
       providerInstanceId: subagent.providerInstanceId,
       model: agent.model ?? null,
+      tokenUsage:
+        agent.totalTokens === undefined ? null : { totalTokens: agent.totalTokens, complete: true },
       status,
       progress: null,
       startedAt: isoFromEpochMillis(agent.startedAt),
@@ -228,8 +330,25 @@ function subagentTree(
   nativeChildren: ReadonlyMap<string, ReadonlyArray<OrchestrationV2Subagent>>,
   parentWorktreePath: string | null,
 ): WorkflowAgent {
-  const status = subagentStatus(subagent.status);
+  const child =
+    subagent.childThreadId === null ? undefined : context.threadsById.get(subagent.childThreadId);
+  const childStatus = child === undefined ? null : shellStatus(child);
+  const status =
+    subagent.origin === "app_owned" && childStatus !== null && workflowStatusIsActive(childStatus)
+      ? childStatus
+      : subagentStatus(subagent.status);
   const workspace = workspaceOf(context, subagent.childThreadId, parentWorktreePath);
+  const workflow =
+    subagent.origin === "provider_native" &&
+    subagent.driver === "claudeAgent" &&
+    subagent.workflow !== undefined;
+  const canStop =
+    workflow ||
+    (subagent.origin === "app_owned" && subagent.childThreadId !== null) ||
+    (subagent.origin === "provider_native" &&
+      subagent.driver === "claudeAgent" &&
+      subagent.nativeTaskRef?.strength === "strong" &&
+      subagent.nativeTaskRef.nativeId !== null);
   const native = (nativeChildren.get(subagent.id) ?? []).map((child) =>
     subagentTree(context, child, nativeChildren, workspace.worktreePath ?? parentWorktreePath),
   );
@@ -240,12 +359,23 @@ function subagentTree(
   );
   return {
     id: subagent.id,
+    control:
+      canStop &&
+      subagent.runId !== null &&
+      (subagent.workflow === undefined || subagent.status === "running")
+        ? {
+            threadId: subagent.threadId,
+            subagentId: subagent.id,
+            ...(workflow ? { workflow: true } : {}),
+          }
+        : null,
     threadId: subagent.childThreadId,
     title: subagent.title?.trim() || firstLine(subagent.prompt) || "Sub-agent",
     task: firstLine(subagent.prompt),
     driver: subagent.driver,
     providerInstanceId: subagent.providerInstanceId,
     model: subagent.modelSelection?.model ?? subagent.model,
+    tokenUsage: null,
     status,
     progress: firstLine(subagent.progress),
     startedAt: iso(subagent.startedAt),
@@ -280,6 +410,7 @@ function mergeStatus(run: OrchestrationV2Run, agents: ReadonlyArray<WorkflowAgen
 export function deriveWorkflowRuns(input: {
   readonly projection: Projection;
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
+  readonly projectionForThread?: (threadId: ThreadId) => Projection | null;
 }): ReadonlyArray<WorkflowRun> {
   const { projection } = input;
   const threadsById = new Map(input.threads.map((thread) => [thread.id, thread]));
@@ -311,6 +442,11 @@ export function deriveWorkflowRuns(input: {
   const latest = ordered.at(-1);
   const pullRequestNumber = projection.thread.linkedPullRequest?.number ?? null;
   const threadWorktreePath = projection.thread.worktreePath;
+  const changedCheckpoints = new Set(
+    projection.checkpoints
+      .filter((checkpoint) => checkpoint.status === "ready" && checkpoint.files.length > 0)
+      .map((checkpoint) => checkpoint.id),
+  );
 
   return ordered.map((run) => {
     const agents = projection.subagents
@@ -321,13 +457,21 @@ export function deriveWorkflowRuns(input: {
             DateTime.toEpochMillis(right.startedAt ?? right.updatedAt) ||
           left.id.localeCompare(right.id),
       )
-      .map((subagent) => subagentTree(context, subagent, nativeChildren, threadWorktreePath));
+      .map((subagent) =>
+        agentWithTokenUsage(
+          subagentTree(context, subagent, nativeChildren, threadWorktreePath),
+          projection,
+          input.projectionForThread ?? (() => null),
+        ),
+      );
+    const mainTokenUsage = runTokenUsage(projection, run);
     const status = runStatus(run.status);
-    const review: WorkflowRun["review"] = workflowStatusIsActive(status)
-      ? { status: "pending", pullRequestNumber: null }
-      : status === "completed"
-        ? { status: "completed", pullRequestNumber: run === latest ? pullRequestNumber : null }
-        : { status, pullRequestNumber: null };
+    const runPullRequest = run === latest ? pullRequestNumber : null;
+    const hasChanges = run.checkpointId !== null && changedCheckpoints.has(run.checkpointId);
+    const review: WorkflowRun["review"] =
+      hasChanges || runPullRequest !== null
+        ? { status: "completed", pullRequestNumber: runPullRequest }
+        : null;
     return {
       id: run.id,
       ordinal: run.ordinal,
@@ -335,6 +479,8 @@ export function deriveWorkflowRuns(input: {
       status,
       providerInstanceId: run.providerInstanceId,
       model: run.modelSelection.model,
+      mainTokenUsage,
+      tokenUsage: sumTokenUsage([mainTokenUsage, ...agents.map((agent) => agent.tokenUsage)]),
       startedAt: iso(run.startedAt),
       completedAt: iso(run.completedAt),
       agents,
@@ -342,6 +488,14 @@ export function deriveWorkflowRuns(input: {
       review,
     };
   });
+}
+
+export function visibleWorkflowRuns(
+  runs: ReadonlyArray<WorkflowRun>,
+  latestRunOnly: boolean,
+): ReadonlyArray<WorkflowRun> {
+  if (!latestRunOnly || runs.length < 2) return runs;
+  return [runs.reduce((latest, run) => (run.ordinal > latest.ordinal ? run : latest))];
 }
 
 /** Agents anywhere in the chart, for counts in the panel header and the toggle's live dot. */

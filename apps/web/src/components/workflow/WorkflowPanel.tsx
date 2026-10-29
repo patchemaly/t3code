@@ -1,4 +1,7 @@
-import { summarizeWorkflowRuns } from "@t3tools/client-runtime/state/workflow-runs";
+import {
+  summarizeWorkflowRuns,
+  visibleWorkflowRuns,
+} from "@t3tools/client-runtime/state/workflow-runs";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -8,12 +11,14 @@ import {
   PanelRightIcon,
   PanelTopIcon,
   WorkflowIcon,
+  ListEndIcon,
   XIcon,
 } from "lucide-react";
 import {
   lazy,
   Suspense,
   useRef,
+  useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -34,6 +39,8 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { buildWorkflowRunGraph } from "./workflowGraph";
+import { WorkflowNodeDetails } from "./WorkflowNodeDetails";
 
 // React Flow loads with the chart, not with the app.
 const WorkflowCanvas = lazy(() => import("./WorkflowCanvas"));
@@ -50,8 +57,10 @@ const DOCK_OPTIONS: ReadonlyArray<{
 ];
 
 const RESIZE_STEP = 24;
-// Never let the chart squeeze the chat out entirely.
+// The chart never squeezes the chat below a usable size.
 const MAX_SHARE = 0.75;
+const MIN_CHAT_WIDTH = 360;
+const MIN_CHAT_HEIGHT = 200;
 
 /**
  * Renders the workflow chart when it is open for this thread and docked at `slot`. ChatView places
@@ -81,11 +90,20 @@ function WorkflowPanel(props: {
   const setDock = useWorkflowPanelStore((state) => state.setDock);
   const setSize = useWorkflowPanelStore((state) => state.setSize);
   const setOpen = useWorkflowPanelStore((state) => state.setOpen);
-  const runs = useWorkflowRuns(threadRef);
+  const allRuns = useWorkflowRuns(threadRef);
+  const latestRunOnly = useWorkflowPanelStore((state) => state.latestRunOnly);
+  const setLatestRunOnly = useWorkflowPanelStore((state) => state.setLatestRunOnly);
+  const runs = visibleWorkflowRuns(allRuns, latestRunOnly);
   const providers = useEnvironmentProviders().get(threadRef.environmentId) ?? [];
   const navigate = useNavigate();
   const panelRef = useRef<HTMLElement>(null);
   const summary = summarizeWorkflowRuns(runs);
+  const [selection, setSelection] = useState<{ threadKey: string; nodeId: string } | null>(null);
+  const selectedNodeId = selection?.threadKey === props.threadKey ? selection.nodeId : null;
+  const selectedRun = runs.find((run) => selectedNodeId?.startsWith(`${run.id}:`));
+  const selectedNode = selectedRun
+    ? buildWorkflowRunGraph(selectedRun).nodes.find((node) => node.id === selectedNodeId)
+    : null;
 
   const openThread = (threadId: ThreadId) => {
     void navigate({
@@ -97,13 +115,21 @@ function WorkflowPanel(props: {
   const maxSize = () => {
     const container = panelRef.current?.parentElement;
     if (!container) return Number.POSITIVE_INFINITY;
-    return (horizontal ? container.clientHeight : container.clientWidth) * MAX_SHARE;
+    const available = horizontal ? container.clientHeight : container.clientWidth;
+    return Math.max(
+      0,
+      Math.min(available * MAX_SHARE, available - (horizontal ? MIN_CHAT_HEIGHT : MIN_CHAT_WIDTH)),
+    );
   };
   const clamp = (next: number) =>
     Math.min(
       Math.max(next, horizontal ? WORKFLOW_PANEL_MIN_HEIGHT : WORKFLOW_PANEL_MIN_WIDTH),
       maxSize(),
     );
+  const renderedSize = () => {
+    const panel = panelRef.current;
+    return panel ? (horizontal ? panel.clientHeight : panel.clientWidth) : size;
+  };
   // Dragging toward the chat grows the panel: up for the bottom dock, down for the top, and so on.
   const growDirection = dock === "bottom" || dock === "right" ? -1 : 1;
 
@@ -114,10 +140,11 @@ function WorkflowPanel(props: {
     const handle = event.currentTarget;
     handle.setPointerCapture(event.pointerId);
     const start = horizontal ? event.clientY : event.clientX;
-    let next = size;
+    const startSize = renderedSize();
+    let next = startSize;
     const onMove = (move: PointerEvent) => {
       const delta = ((horizontal ? move.clientY : move.clientX) - start) * growDirection;
-      next = clamp(size + delta);
+      next = clamp(startSize + delta);
       // Resize the element directly while dragging; the store saves once on release.
       panel.style.setProperty(horizontal ? "height" : "width", `${next}px`);
     };
@@ -139,14 +166,16 @@ function WorkflowPanel(props: {
     const direction = grow[event.key as keyof typeof grow];
     if (direction === undefined) return;
     event.preventDefault();
-    setSize(dock, clamp(size + direction * RESIZE_STEP));
+    setSize(dock, clamp(renderedSize() + direction * RESIZE_STEP));
   };
 
   const summaryText =
     runs.length === 0
       ? "No runs yet"
       : [
-          `${runs.length} ${runs.length === 1 ? "run" : "runs"}`,
+          latestRunOnly && allRuns.length > 1
+            ? `1 of ${allRuns.length} runs`
+            : `${runs.length} ${runs.length === 1 ? "run" : "runs"}`,
           `${summary.agentCount} ${summary.agentCount === 1 ? "agent" : "agents"}`,
           ...(summary.working > 0 ? [`${summary.working} working`] : []),
           ...(summary.waiting > 0 ? [`${summary.waiting} waiting`] : []),
@@ -164,7 +193,17 @@ function WorkflowPanel(props: {
         dock === "left" && "border-r",
         dock === "right" && "border-l",
       )}
-      style={horizontal ? { height: size } : { width: size }}
+      style={
+        horizontal
+          ? {
+              height: size,
+              maxHeight: `max(0px, min(${MAX_SHARE * 100}%, calc(100% - ${MIN_CHAT_HEIGHT}px)))`,
+            }
+          : {
+              width: size,
+              maxWidth: `max(0px, min(${MAX_SHARE * 100}%, calc(100% - ${MIN_CHAT_WIDTH}px)))`,
+            }
+      }
     >
       <div
         role="separator"
@@ -193,7 +232,7 @@ function WorkflowPanel(props: {
           )}
         />
       </div>
-      <header className="flex h-8 shrink-0 items-center gap-2 border-b pr-1.5 pl-3 text-xs">
+      <header className="flex h-8 shrink-0 items-center gap-1.5 border-b pr-1.5 pl-3 text-xs">
         <span className="flex items-center gap-1.5 font-semibold">
           <WorkflowIcon aria-hidden className="size-3.5" />
           Workflow
@@ -201,6 +240,22 @@ function WorkflowPanel(props: {
         <span className="min-w-0 flex-1 truncate text-muted-foreground" aria-live="polite">
           {summaryText}
         </span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                size="xs"
+                variant="ghost"
+                aria-label="Show only the latest run"
+                pressed={latestRunOnly}
+                onPressedChange={setLatestRunOnly}
+              >
+                <ListEndIcon aria-hidden className="size-3.5" />
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">Last run only</TooltipPopup>
+        </Tooltip>
         <ToggleGroup
           size="xs"
           aria-label="Workflow chart position"
@@ -249,10 +304,21 @@ function WorkflowPanel(props: {
               runs={runs}
               horizontal={horizontal}
               providers={providers}
-              onOpenThread={openThread}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={(nodeId) => setSelection({ threadKey: props.threadKey, nodeId })}
             />
           </Suspense>
         )}
+        {selectedNode ? (
+          <WorkflowNodeDetails
+            key={selectedNode.id}
+            node={selectedNode}
+            threadRef={threadRef}
+            providers={providers}
+            onClose={() => setSelection(null)}
+            onOpenThread={openThread}
+          />
+        ) : null}
       </div>
     </section>
   );

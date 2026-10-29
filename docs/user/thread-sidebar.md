@@ -262,6 +262,21 @@ layouts with an inspector, its thread opens beside the parent. Maximize it to
 fill the screen; close the full-screen view to return to the parent and inspector.
 Stop on a thread also stops the subagents it delegated to.
 
+On web and desktop, open **Workflow** in the chat header to inspect runs as a graph.
+Use **Last run only** to hide older runs and follow each new run automatically.
+Turn it off to restore the full history. This preference is remembered across sessions.
+Click a node for live details. From an agent's details, use **Stop agent** to stop
+supported work, or enter a next instruction and choose **Run agent** to start a new
+turn in an idle, independently runnable thread. This uses that thread's current
+model and permissions; it does not recreate the original delegated task.
+Provider-owned agents may require control through their parent or workflow
+coordinator. **Review changes** appears only when the run has captured file changes
+or a linked pull request; it does not indicate that a review was performed.
+Token counts beside agents include their nested agents; the run total includes
+the main agent and all delegated work without counting nested agents twice.
+Counts marked **partial** exclude unavailable usage. **N/A** means the provider
+has not reported consumption, not that it used zero tokens.
+
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.

@@ -31,7 +31,11 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   config: Pick<ClaudeSettings, "homePath">,
   baseEnv?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
-  const resolvedBaseEnv = baseEnv ?? process.env;
+  const inheritedEnv = baseEnv ?? process.env;
+  const resolvedBaseEnv = {
+    ...inheritedEnv,
+    CLAUDE_CODE_ENTRYPOINT: inheritedEnv.CLAUDE_CODE_ENTRYPOINT ?? "t3-code",
+  };
   const homePath = config.homePath.trim();
   if (homePath.length === 0) return resolvedBaseEnv;
   const resolvedHomePath = yield* resolveClaudeHomePath(config);

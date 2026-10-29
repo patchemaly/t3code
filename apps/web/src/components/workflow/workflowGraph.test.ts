@@ -1,26 +1,31 @@
 import type { WorkflowAgent, WorkflowRun } from "@t3tools/client-runtime/state/workflow-runs";
-import { ProviderInstanceId, RunId } from "@t3tools/contracts";
+import { NodeId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
 
 import {
   arrangeRuns,
   buildWorkflowRunGraph,
+  initialViewport,
   tidyLayoutRun,
   WORKFLOW_NODE_SIZE,
   workflowGraphShapeKey,
   type RunLayout,
   type WorkflowRunGraph,
 } from "./workflowGraph";
+import { workflowNodeActions } from "./workflowNodeActions";
 
 function agent(id: string, overrides: Partial<WorkflowAgent> = {}): WorkflowAgent {
   return {
     id,
+    control: null,
     threadId: null,
     title: id,
     task: null,
     driver: null,
     providerInstanceId: null,
     model: null,
+    tokenUsage: null,
     status: "running",
     progress: null,
     startedAt: null,
@@ -44,6 +49,8 @@ function run(
     status: "running",
     providerInstanceId: ProviderInstanceId.make("claude"),
     model: "claude-opus",
+    mainTokenUsage: null,
+    tokenUsage: null,
     startedAt: null,
     completedAt: null,
     agents,
@@ -74,6 +81,14 @@ function boxes(graph: WorkflowRunGraph, layout: RunLayout) {
 }
 
 describe("buildWorkflowRunGraph", () => {
+  it("omits review nodes and edges when the run has nothing to review", () => {
+    for (const agents of [[], [agent("alpha")]]) {
+      const graph = buildWorkflowRunGraph(run(agents, { review: null }));
+      expect(graph.nodes.some((node) => node.kind === "review")).toBe(false);
+      expect(graph.edges.some((edge) => edge.target.endsWith(":review"))).toBe(false);
+      expect(boxes(graph, tidyLayoutRun(graph)).every((box) => Number.isFinite(box.x))).toBe(true);
+    }
+  });
   it("charts a run that delegated nothing as prompt, main agent, review", () => {
     const graph = buildWorkflowRunGraph(run([]));
 
@@ -216,5 +231,154 @@ describe("arrangeRuns", () => {
       [0, 0],
       [0, 240],
     ]);
+  });
+});
+
+describe("initialViewport", () => {
+  const group = { x: 400, y: 0, width: 600, height: 500 };
+
+  it("centers a run that fits at full size", () => {
+    expect(initialViewport(group, { width: 1000, height: 800 })).toEqual({
+      x: -200,
+      y: 150,
+      zoom: 1,
+    });
+  });
+
+  it("shrinks a run to fit, but keeps it readable and shows a tall run from its top", () => {
+    expect(initialViewport(group, { width: 1000, height: 424 }).zoom).toBe(0.8);
+    const short = initialViewport(group, { width: 1000, height: 200 });
+    expect(short.zoom).toBe(0.75);
+    expect(short.y).toBe(12);
+  });
+});
+
+describe("workflowNodeActions", () => {
+  const parent = ThreadId.make("parent");
+  const child = ThreadId.make("child");
+  const idleThread = {
+    status: "idle" as const,
+    activeRunId: null,
+    latestRunId: RunId.make("run-1"),
+    lineage: { rootThreadId: parent, parentThreadId: null, relationshipToParent: null },
+    creationSource: "web" as const,
+    archivedAt: null,
+    deletedAt: null,
+  };
+
+  it("runs idle app-owned agents in their child thread and stops through the owning task", () => {
+    const member = agent("alpha", {
+      threadId: child,
+      control: { threadId: parent, subagentId: NodeId.make("alpha") },
+      status: "completed",
+    });
+    const node = { id: "alpha", kind: "agent" as const, agent: member, phase: null };
+    expect(workflowNodeActions(node, parent, idleThread)).toMatchObject({
+      threadId: child,
+      canRun: true,
+      canStop: false,
+      stopInput: { threadId: parent, subagentId: "alpha" },
+    });
+    expect(
+      workflowNodeActions({ ...node, agent: { ...member, status: "running" } }, parent, idleThread),
+    ).toMatchObject({ canRun: false, canStop: true });
+  });
+
+  it("does not stop another active run when inspecting history or a queued run", () => {
+    const node = { id: "main", kind: "main" as const, run: run([]) };
+    expect(
+      workflowNodeActions(node, parent, {
+        ...idleThread,
+        status: "running",
+        activeRunId: RunId.make("newer"),
+        latestRunId: node.run.id,
+      }).canStop,
+    ).toBe(false);
+    expect(
+      workflowNodeActions(node, parent, {
+        ...idleThread,
+        status: "running",
+        activeRunId: node.run.id,
+      }).canStop,
+    ).toBe(true);
+    expect(workflowNodeActions(node, parent, idleThread).canRun).toBe(true);
+  });
+
+  it("allows new turns after terminal runs without offering to stop them", () => {
+    const node = { id: "main", kind: "main" as const, run: run([]) };
+    for (const status of [
+      "completed",
+      "failed",
+      "interrupted",
+      "cancelled",
+      "rolled_back",
+    ] as const) {
+      expect(workflowNodeActions(node, parent, { ...idleThread, status })).toMatchObject({
+        canRun: true,
+        canStop: false,
+      });
+    }
+  });
+
+  it("does not offer unsupported native-member controls or messages to provider-owned threads", () => {
+    const member = agent("native", { threadId: child, status: "completed" });
+    const node = { id: "native", kind: "agent" as const, agent: member, phase: null };
+    const nativeThread = {
+      ...idleThread,
+      creationSource: "provider" as const,
+      lineage: {
+        rootThreadId: parent,
+        parentThreadId: parent,
+        relationshipToParent: "subagent" as const,
+      },
+    };
+    expect(workflowNodeActions(node, parent, nativeThread)).toMatchObject({
+      canRun: false,
+      canStop: false,
+    });
+    expect(
+      workflowNodeActions(
+        { ...node, agent: { ...member, status: "running" } },
+        parent,
+        nativeThread,
+      ).canStop,
+    ).toBe(false);
+    expect(workflowNodeActions(node, parent, null).canRun).toBe(false);
+    expect(
+      workflowNodeActions({ id: "main", kind: "main", run: run([]) }, child, {
+        ...nativeThread,
+        status: "running",
+        activeRunId: RunId.make("run-1"),
+      }).canStop,
+    ).toBe(false);
+  });
+
+  it("routes a workflow coordinator through its dedicated stop operation", () => {
+    const node = {
+      id: "flow",
+      kind: "agent" as const,
+      phase: null,
+      agent: agent("flow", {
+        control: { threadId: parent, subagentId: NodeId.make("flow"), workflow: true },
+      }),
+    };
+    expect(workflowNodeActions(node, parent, null)).toMatchObject({
+      canStop: true,
+      canRun: false,
+      stopWorkflowInput: { threadId: parent, subagentId: "flow" },
+    });
+  });
+
+  it("does not restart archived threads or offer controls on informational stages", () => {
+    const node = { id: "main", kind: "main" as const, run: run([]) };
+    expect(
+      workflowNodeActions(node, parent, {
+        ...idleThread,
+        archivedAt: DateTime.makeUnsafe("2026-10-26T00:00:00Z"),
+      }).canRun,
+    ).toBe(false);
+    expect(workflowNodeActions({ id: "router", kind: "router" }, parent, idleThread)).toMatchObject(
+      { canRun: false, canStop: false },
+    );
   });
 });

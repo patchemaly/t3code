@@ -20,9 +20,11 @@ interface WorkflowPanelState {
   readonly dock: WorkflowPanelDock;
   readonly height: number;
   readonly width: number;
+  readonly latestRunOnly: boolean;
   /** Open is per thread, like the terminal drawer. Closed threads have no entry. */
   readonly openByThreadKey: Readonly<Record<string, true>>;
   readonly setDock: (dock: WorkflowPanelDock) => void;
+  readonly setLatestRunOnly: (latestRunOnly: boolean) => void;
   readonly setSize: (dock: WorkflowPanelDock, size: number) => void;
   readonly setOpen: (threadKey: string, open: boolean) => void;
 }
@@ -33,8 +35,10 @@ export const useWorkflowPanelStore = create<WorkflowPanelState>()(
       dock: "bottom",
       height: DEFAULT_HEIGHT,
       width: DEFAULT_WIDTH,
+      latestRunOnly: false,
       openByThreadKey: {},
       setDock: (dock) => set({ dock }),
+      setLatestRunOnly: (latestRunOnly) => set({ latestRunOnly }),
       setSize: (dock, size) =>
         set(
           workflowPanelIsHorizontal(dock)
@@ -53,10 +57,11 @@ export const useWorkflowPanelStore = create<WorkflowPanelState>()(
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
-      partialize: ({ dock, height, width, openByThreadKey }) => ({
+      partialize: ({ dock, height, width, latestRunOnly, openByThreadKey }) => ({
         dock,
         height,
         width,
+        latestRunOnly,
         openByThreadKey,
       }),
     },

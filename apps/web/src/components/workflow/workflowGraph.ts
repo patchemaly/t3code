@@ -62,7 +62,7 @@ export const WORKFLOW_NODE_SIZE: Record<WorkflowNodeKind, { width: number; heigh
   orchestrator: { width: 150, height: 44 },
   main: { width: 232, height: 64 },
   router: { width: 210, height: 42 },
-  agent: { width: 232, height: 68 },
+  agent: { width: 232, height: 84 },
   worktree: { width: 190, height: 28 },
   collect: { width: 170, height: 28 },
   merge: { width: 232, height: 46 },
@@ -170,11 +170,11 @@ export function buildWorkflowRunGraph(run: WorkflowRun): WorkflowRunGraph {
       edge(end, id.merge, { join: true, ...(index === 0 ? { label: "results" } : {}) });
     });
     nodes.push({ id: id.merge, kind: "merge", status: run.merge ?? "pending" });
-    edge(id.merge, id.review);
-  } else {
-    edge(id.main, id.review);
   }
-  nodes.push({ id: id.review, kind: "review", run });
+  if (run.review !== null) {
+    edge(delegated ? id.merge : id.main, id.review);
+    nodes.push({ id: id.review, kind: "review", run });
+  }
 
   return {
     run,
@@ -323,7 +323,9 @@ export function tidyLayoutRun(graph: WorkflowRunGraph): RunLayout {
     positions.set(id.merge, { x: center - size.merge.width / 2, y: mergeTop });
     bottom = mergeTop + size.merge.height;
   }
-  positions.set(id.review, { x: center - size.review.width / 2, y: bottom + ROW_GAP });
+  if (graph.run.review !== null) {
+    positions.set(id.review, { x: center - size.review.width / 2, y: bottom + ROW_GAP });
+  }
   return finishRunLayout(graph, positions);
 }
 
@@ -352,6 +354,29 @@ export function arrangeRuns(
     offset += (horizontal ? layout.width : layout.height) + RUN_GAP;
     return group;
   });
+}
+
+const VIEWPORT_MARGIN = 12;
+const READABLE_ZOOM = 0.75;
+
+/**
+ * Frames a run so its text stays readable: shrink it to fit, but never below READABLE_ZOOM. A run
+ * too tall for the panel shows from its top (the prompt) and the rest is a scroll away.
+ */
+export function initialViewport(
+  group: Pick<WorkflowLayoutGroup, "x" | "y" | "width" | "height">,
+  viewport: { readonly width: number; readonly height: number },
+) {
+  const room = (size: number) => Math.max(size - VIEWPORT_MARGIN * 2, 1);
+  const fit = Math.min(room(viewport.width) / group.width, room(viewport.height) / group.height);
+  const zoom = Math.min(1, Math.max(fit, READABLE_ZOOM));
+  const offset = (available: number, size: number) =>
+    size * zoom <= room(available) ? (available - size * zoom) / 2 : VIEWPORT_MARGIN;
+  return {
+    x: offset(viewport.width, group.width) - group.x * zoom,
+    y: offset(viewport.height, group.height) - group.y * zoom,
+    zoom,
+  };
 }
 
 /** Identifies a run's shape, so a status change reuses the cached layout. */

@@ -1,5 +1,6 @@
 import type * as DateTime from "effect/DateTime";
 import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type {
   EnvironmentProject,
   EnvironmentThread,
@@ -405,6 +406,9 @@ const workflowRunsAtomFamily = Atom.family((key: string) => {
     const next = deriveWorkflowRuns({
       projection: thread.projection,
       threads: get(environmentThreadShells.environmentThreadsAtom(ref.environmentId)),
+      projectionForThread: (threadId) =>
+        get(environmentThreadDetails.quietThreadAtom(scopeThreadRef(ref.environmentId, threadId)))
+          ?.projection ?? null,
     });
     // Any thread in the environment changing reruns this; keep the old value when the chart is
     // the same so the open panel does not redraw.

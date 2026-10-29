@@ -20,17 +20,20 @@ import {
   Position,
   ReactFlow,
   type Edge,
+  type ReactFlowInstance,
   type EdgeProps,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
 import { GitBranchIcon, MessageSquareIcon, Undo2Icon, WorkflowIcon } from "lucide-react";
-import { memo, useEffect, useReducer, type ReactNode } from "react";
+import { memo, useEffect, useReducer, useRef, type ReactNode } from "react";
 
 import { AgentElapsed } from "../chat/AgentElapsed";
+import { WorkflowTokens } from "./WorkflowTokens";
 import {
   arrangeRuns,
   buildWorkflowRunGraph,
+  initialViewport,
   ROW_GAP,
   tidyLayoutRun,
   WORKFLOW_NODE_SIZE,
@@ -45,7 +48,8 @@ export interface WorkflowCanvasProps {
   readonly runs: ReadonlyArray<WorkflowRun>;
   readonly horizontal: boolean;
   readonly providers: ReadonlyArray<ServerProvider>;
-  readonly onOpenThread: (threadId: NonNullable<WorkflowAgent["threadId"]>) => void;
+  readonly selectedNodeId: string | null;
+  readonly onSelectNode: (nodeId: string) => void;
 }
 
 const STATUS_LABEL: Record<WorkflowStatus, string> = {
@@ -84,7 +88,7 @@ function nodeStatus(node: WorkflowGraphNode): WorkflowStatus | null {
     case "merge":
       return node.status;
     case "review":
-      return node.run.review.status;
+      return node.run.review?.status ?? null;
   }
 }
 
@@ -111,6 +115,10 @@ function cacheElkLayout(key: string, layout: RunLayout) {
 
 const PENDING_LAYOUT: RunLayout = { positions: new Map(), width: 420, height: 220 };
 
+function loadElkLayout(graph: WorkflowRunGraph) {
+  return import("./workflowElkLayout").then(({ elkLayoutRun }) => elkLayoutRun(graph));
+}
+
 function useRunLayouts(graphs: ReadonlyArray<WorkflowRunGraph>) {
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const keys = graphs.map(workflowGraphShapeKey);
@@ -121,15 +129,14 @@ function useRunLayouts(graphs: ReadonlyArray<WorkflowRunGraph>) {
       : [];
   });
   const missingKey = missing.map(({ key }) => key).join("\n");
-  // oxlint-disable-next-line t3code/react-effect-budget -- ELK lays out in a worker; the result lands in a module cache and rerenders.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Synchronize the chart with asynchronous ELK worker layouts cached outside React.
   useEffect(() => {
     let cancelled = false;
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `missingKey` names exactly the graphs in `missing`.
     for (const { graph, key } of missing) {
       if (elkPending.has(key)) continue;
       elkPending.add(key);
-      import("./workflowElkLayout")
-        .then(({ elkLayoutRun }) => elkLayoutRun(graph))
+      loadElkLayout(graph)
         .then((layout) => cacheElkLayout(key, layout))
         .catch(() => elkFailed.add(key))
         .finally(() => {
@@ -155,7 +162,8 @@ function useRunLayouts(graphs: ReadonlyArray<WorkflowRunGraph>) {
 interface FlowNodeData extends Record<string, unknown> {
   readonly node: WorkflowGraphNode;
   readonly providers: ReadonlyArray<ServerProvider>;
-  readonly onOpenThread: WorkflowCanvasProps["onOpenThread"];
+  readonly selected: boolean;
+  readonly onSelectNode: WorkflowCanvasProps["onSelectNode"];
 }
 
 interface RunNodeData extends Record<string, unknown> {
@@ -241,7 +249,10 @@ function NodeBody({ node, providers }: Pick<FlowNodeData, "node" | "providers">)
             <StatusText status={node.run.status} />
           </Row>
           <Muted>{formatModelSlugName(node.run.model)} · this thread</Muted>
-          <Muted>plans, then delegates</Muted>
+          <Row>
+            <Muted>own usage</Muted>
+            <WorkflowTokens usage={node.run.mainTokenUsage} />
+          </Row>
         </>
       );
     case "router":
@@ -273,6 +284,7 @@ function NodeBody({ node, providers }: Pick<FlowNodeData, "node" | "providers">)
               <AgentElapsed agent={elapsedAgent(agent)} compact />
             </span>
           </Row>
+          <WorkflowTokens usage={agent.tokenUsage} />
         </>
       );
     }
@@ -294,29 +306,32 @@ function NodeBody({ node, providers }: Pick<FlowNodeData, "node" | "providers">)
       return (
         <>
           <Row>
-            <Title>Main agent merges results</Title>
+            <Title>Merge results</Title>
             <StatusText status={node.status} />
           </Row>
           <Muted>
-            {node.status === "pending" ? "waiting on agents" : "partial results into one change"}
+            {node.status === "pending"
+              ? "waiting on agents"
+              : "main agent combines partial results"}
           </Muted>
         </>
       );
     case "review": {
       const { review } = node.run;
+      if (review === null) return null;
       return (
         <>
           <Row>
-            <Title>Review</Title>
+            <Title>Review changes</Title>
             <StatusText
               status={review.status}
-              text={review.status === "completed" ? "Ready" : null}
+              text={review.status === "completed" ? "Available" : null}
             />
           </Row>
           <Muted>
             {review.pullRequestNumber !== null
               ? `PR #${review.pullRequestNumber}`
-              : "diff · commit · push · PR"}
+              : "workspace changes available"}
           </Muted>
         </>
       );
@@ -329,7 +344,7 @@ function nodeAccessibleName(node: WorkflowGraphNode): string {
   const suffix = status === null ? "" : `, ${STATUS_LABEL[status].toLowerCase()}`;
   switch (node.kind) {
     case "agent":
-      return `Agent ${node.agent.title}${suffix}. Open its thread.`;
+      return `Agent ${node.agent.title}${suffix}. Show details.`;
     case "main":
       return `Main agent${suffix}`;
     case "merge":
@@ -346,27 +361,23 @@ function nodeAccessibleName(node: WorkflowGraphNode): string {
 const WorkflowNodeView = memo(function WorkflowNodeView({ data }: NodeProps<Node<FlowNodeData>>) {
   const { node } = data;
   const status = nodeStatus(node);
-  const opensThread = node.kind === "agent" && node.agent.threadId !== null;
   const body = <NodeBody node={node} providers={data.providers} />;
   return (
     <>
       <Handle type="target" position={Position.Top} id="t" isConnectable={false} />
       <Handle type="target" position={Position.Left} id="l" isConnectable={false} />
-      {opensThread ? (
-        <button
-          type="button"
-          data-wf-node={node.kind}
-          data-status={status ?? undefined}
-          aria-label={nodeAccessibleName(node)}
-          onClick={() => data.onOpenThread(node.agent.threadId!)}
-        >
-          {body}
-        </button>
-      ) : (
-        <div data-wf-node={node.kind} data-status={status ?? undefined}>
-          {body}
-        </div>
-      )}
+      <button
+        type="button"
+        className="cursor-pointer"
+        data-wf-node={node.kind}
+        data-status={status ?? undefined}
+        data-selected={data.selected}
+        aria-label={nodeAccessibleName(node)}
+        aria-pressed={data.selected}
+        onClick={() => data.onSelectNode(node.id)}
+      >
+        {body}
+      </button>
       <Handle type="source" position={Position.Bottom} id="b" isConnectable={false} />
       <Handle type="source" position={Position.Right} id="r" isConnectable={false} />
     </>
@@ -380,6 +391,7 @@ function RunNodeView({ data }: NodeProps<Node<RunNodeData>>) {
       <div data-wf-run-label data-live={live}>
         {live ? <span aria-hidden data-wf-dot /> : null}
         Run {data.run.ordinal}
+        <WorkflowTokens usage={data.run.tokenUsage} />
         {live ? " · live" : ""}
         {data.pending ? " · laying out…" : ""}
       </div>
@@ -487,7 +499,12 @@ export default function WorkflowCanvas(props: WorkflowCanvasProps) {
         parentId: groupId,
         position,
         ...WORKFLOW_NODE_SIZE[node.kind],
-        data: { node, providers: props.providers, onOpenThread: props.onOpenThread },
+        data: {
+          node,
+          providers: props.providers,
+          selected: props.selectedNodeId === node.id,
+          onSelectNode: props.onSelectNode,
+        },
         draggable: false,
         selectable: false,
         focusable: false,
@@ -500,26 +517,32 @@ export default function WorkflowCanvas(props: WorkflowCanvasProps) {
       edges.push(toFlowEdge(edge, edgeState(nodeStatus(source), nodeStatus(target))));
     }
   });
-  const latest = graphs.at(-1);
+  const latestGroup = groups.at(-1);
+  const flowRef = useRef<HTMLDivElement>(null);
+  const frameLatestRun = (instance: ReactFlowInstance<FlowNode, FlowEdge>) => {
+    const element = flowRef.current;
+    if (!element || !latestGroup) return;
+    void instance.setViewport(
+      initialViewport(latestGroup, { width: element.clientWidth, height: element.clientHeight }),
+    );
+  };
 
   return (
     <ReactFlow
-      // A new run or another dock refits on the newest run; status changes keep the viewport.
-      key={`${props.horizontal}:${graphs.length}`}
+      // A new run or another dock reframes the newest run; status changes keep the viewport.
+      key={`${props.horizontal}:${graphs.at(-1)?.run.id}:${graphs.length}`}
+      ref={flowRef}
+      onInit={frameLatestRun}
       data-workflow-flow
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
-      fitView
-      fitViewOptions={{
-        padding: 0.06,
-        maxZoom: 1,
-        ...(latest ? { nodes: [{ id: `run:${latest.run.id}` }] } : {}),
-      }}
       minZoom={0.15}
       maxZoom={1.6}
       nodesDraggable={false}
+      noDragClassName="cursor-pointer"
+      noPanClassName="cursor-pointer"
       nodesConnectable={false}
       elementsSelectable={false}
       onlyRenderVisibleElements

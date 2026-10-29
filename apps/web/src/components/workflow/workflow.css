@@ -1,7 +1,6 @@
 /*
  * Workflow chart. Loaded with the chart's lazy chunk.
- * Node animations use transform and opacity only, so they stay on the compositor. Only edges into
- * running nodes animate their dashes. Everything stops under prefers-reduced-motion.
+ * Node animations use transform and opacity only. Everything stops under prefers-reduced-motion.
  */
 
 [data-workflow-flow] {
@@ -54,7 +53,6 @@
   stroke: var(--wf-running);
   stroke-width: 1.6;
   stroke-dasharray: 5 5;
-  animation: wf-dash 0.8s linear infinite;
 }
 [data-workflow-flow] .wf-edge-waiting .react-flow__edge-path {
   stroke: var(--wf-waiting);
@@ -104,11 +102,16 @@
 }
 button[data-wf-node] {
   cursor: pointer;
+  pointer-events: auto;
 }
 button[data-wf-node]:hover {
   border-color: color-mix(in srgb, var(--foreground) 25%, var(--border));
 }
 [data-wf-node]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+[data-wf-node][data-selected="true"] {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
@@ -195,7 +198,6 @@ button[data-wf-node]:hover {
   min-width: 0;
   align-items: center;
   gap: 5px;
-  overflow: hidden;
   color: var(--muted-foreground);
   font-size: 10px;
   text-overflow: ellipsis;
@@ -281,12 +283,6 @@ button[data-wf-node]:hover {
     opacity: 0.35;
   }
 }
-@keyframes wf-dash {
-  to {
-    stroke-dashoffset: -20;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   [data-workflow-flow] *,
   [data-workflow-flow] *::before,
